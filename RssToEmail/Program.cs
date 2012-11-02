@@ -52,7 +52,18 @@ namespace RssToEmail
 							{
 								try
 								{
-									var content = item.Summary.Text;
+									var content = string.Empty;
+									if (item.Summary != null)
+									{
+										content = item.Summary.Text;
+									}
+									else 
+									{
+										var textContent = item.Content as TextSyndicationContent;
+										if (textContent != null)
+											content = textContent.Text;
+									}
+
 
 									if (!supportsContentEncoding.HasValue || supportsContentEncoding.Value)
 									{
