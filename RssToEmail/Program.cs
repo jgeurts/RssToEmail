@@ -41,7 +41,7 @@ namespace RssToEmail
 						var from = new MailAddress(ConfigurationManager.AppSettings["from"], feed.Title.Text);
 
 						bool? supportsContentEncoding = null;
-						foreach (var item in feed.Items)
+						foreach (var item in feed.Items.Reverse())
 						{
 							// Ignore previously processed items
 							if (savedFeed.SentItems.Contains(item.Id))
