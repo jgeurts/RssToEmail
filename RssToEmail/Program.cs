@@ -7,6 +7,7 @@ using System.Web;
 using System.Xml;
 using System.Xml.Linq;
 using Raven.Client.Embedded;
+using Raven.Database.Server;
 using RssToEmail.Models;
 
 namespace RssToEmail
@@ -19,12 +20,20 @@ namespace RssToEmail
 			var to = new MailAddress(ConfigurationManager.AppSettings["to"]);
 			bool sendAllForNewFeeds;
 			bool.TryParse(ConfigurationManager.AppSettings["SendAllForNewFeeds"] ?? "false", out sendAllForNewFeeds);
-
+			Console.Write("Starting raven...");
+//			NonAdminHttp.EnsureCanListenToWhenInNonAdminContext(43233);
 			var documentStore = new EmbeddableDocumentStore
 							{
-								ConnectionStringName = "RavenDB"
-							}.Initialize();
-
+								ConnectionStringName = "RavenDB",
+//								UseEmbeddedHttpServer = true
+							};
+//			documentStore.Configuration.Port = 43233;
+			documentStore.Initialize();
+			Console.WriteLine("Done");
+			//using (var session = documentStore.OpenSession())
+			//{
+			//    Console.Read();
+			//}
 			using (var session = documentStore.OpenSession())
 			{
 				foreach (var url in urls)
@@ -34,77 +43,101 @@ namespace RssToEmail
 							Url = url
 						};
 					var isNew = !savedFeed.SentItems.Any();
-
-					using (var f = XmlReader.Create(url))
+					Console.Write("Processing " + url + "...");
+					try
 					{
-						var feed = SyndicationFeed.Load(f);
-						var from = new MailAddress(ConfigurationManager.AppSettings["from"], feed.Title.Text);
-
-						bool? supportsContentEncoding = null;
-						foreach (var item in feed.Items.Reverse())
+						using (var f = XmlReader.Create(url))
 						{
-							// Ignore previously processed items
-							if (savedFeed.SentItems.Contains(item.Id))
-								continue;
+							var feed = SyndicationFeed.Load(f);
+							var from = new MailAddress(ConfigurationManager.AppSettings["from"], feed.Title.Text);
 
-							// Only send an email if the url is not new or if the user configures that new urls should send all current items
-							if (!isNew  || sendAllForNewFeeds)
+							bool? supportsContentEncoding = null;
+							foreach (var item in feed.Items.Reverse())
 							{
-								try
+								var linkUri = item.Links.FirstOrDefault();
+								var link = string.Empty;
+								if (linkUri != null)
+									link = linkUri.Uri.ToString().Split('?').First();
+
+								var id = item.Id;
+								if (item.Id.Contains("?key="))
 								{
-									var content = string.Empty;
-									if (item.Summary != null)
-									{
-										content = item.Summary.Text;
-									}
-									else 
-									{
-										var textContent = item.Content as TextSyndicationContent;
-										if (textContent != null)
-											content = textContent.Text;
-									}
+									id = item.Id.Split(new [] { "?key=" }, StringSplitOptions.RemoveEmptyEntries)[1];
+								}
 
+								// Ignore previously processed items
+								if (savedFeed.SentItems.Any(x => 
+										x.Id.Equals(id, StringComparison.OrdinalIgnoreCase) || 
+										x.Id.Equals(item.Id, StringComparison.OrdinalIgnoreCase) || 
+										(!string.IsNullOrEmpty(x.Url) && x.Url == link)))
+									continue;
 
-									if (!supportsContentEncoding.HasValue || supportsContentEncoding.Value)
+								// Only send an email if the url is not new or if the user configures that new urls should send all current items
+								if (!isNew  || sendAllForNewFeeds)
+								{
+									try
 									{
-										if (!supportsContentEncoding.HasValue)
-											supportsContentEncoding = false;
-
-										// If the feed has a <content:encoded> item, use that instead of what comes from <description>
-										foreach (var extension in item.ElementExtensions)
+										var content = string.Empty;
+										if (item.Summary != null)
 										{
-											var element = extension.GetObject<XElement>();
-											if (element.Name.LocalName == "encoded" && element.Name.Namespace.ToString().Contains("content"))
+											content = item.Summary.Text;
+										}
+										else 
+										{
+											var textContent = item.Content as TextSyndicationContent;
+											if (textContent != null)
+												content = textContent.Text;
+										}
+
+
+										if (!supportsContentEncoding.HasValue || supportsContentEncoding.Value)
+										{
+											if (!supportsContentEncoding.HasValue)
+												supportsContentEncoding = false;
+
+											// If the feed has a <content:encoded> item, use that instead of what comes from <description>
+											foreach (var extension in item.ElementExtensions)
 											{
-												content = element.Value;
-												supportsContentEncoding = true;
-												break;
+												var element = extension.GetObject<XElement>();
+												if (element.Name.LocalName == "encoded" && element.Name.Namespace.ToString().Contains("content"))
+												{
+													content = element.Value;
+													supportsContentEncoding = true;
+													break;
+												}
 											}
 										}
+
+										var message = new MailMessage(from, to) {
+											Subject = "[New Post] " + item.Title.Text, 
+											Body = content + string.Format("<p style=\"font-size:12px;line-height:1.4em;margin:10px 0px 10px 0px\">View the original article: <a href=\"{0}\">{0}</a></p>", link), 
+											IsBodyHtml = true
+										};
+
+										var smtp = new SmtpClient();
+										smtp.Send(message);
 									}
-
-									var link = item.Links.FirstOrDefault();
-
-									var message = new MailMessage(from, to) {
-										Subject = "[New Post] " + item.Title.Text, 
-										Body = content + string.Format("<p style=\"font-size:12px;line-height:1.4em;margin:10px 0px 10px 0px\">View the original article: <a href=\"{0}\">{0}</a></p>", link != null ? link.Uri.ToString() : string.Empty), 
-										IsBodyHtml = true
-									};
-
-									var smtp = new SmtpClient();
-									smtp.Send(message);
+									catch (Exception ex)
+									{
+										// Ignore this for now... we'll just try again next time the app runs
+										continue;
+									}
 								}
-								catch (Exception ex)
+
+								savedFeed.SentItems.Add(new FeedItem
 								{
-									// Ignore this for now... we'll just try again next time the app runs
-									continue;
-								}
+									Id = id,
+									Url = link
+								});
 							}
-
-							savedFeed.SentItems.Add(item.Id);
 						}
+						session.Store(savedFeed);
+						Console.WriteLine("Done");
 					}
-					session.Store(savedFeed);
+					catch (Exception ex)
+					{
+						Console.WriteLine("\n" + ex);
+					}
 				}
 				session.SaveChanges();
 			}
