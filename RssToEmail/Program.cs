@@ -48,7 +48,7 @@ namespace RssToEmail
 					var failedSends = 0;
 					foreach (var url in urls)
 					{
-						var savedFeed = session.Query<Feed>().SingleOrDefault(x => x.Url == url) ?? 
+						var savedFeed = session.Query<Feed>().Customize(x => x.WaitForNonStaleResultsAsOfLastWrite()).SingleOrDefault(x => x.Url == url) ?? 
 							new Feed {
 								Url = url
 							};
