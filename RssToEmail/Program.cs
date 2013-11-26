@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Configuration;
+using System.Diagnostics;
 using System.Linq;
 using System.Net.Mail;
 using System.ServiceModel.Syndication;
@@ -8,138 +9,164 @@ using System.Xml;
 using System.Xml.Linq;
 using Raven.Client.Embedded;
 using Raven.Database.Server;
+using RssToEmail.Extensions;
 using RssToEmail.Models;
+using log4net;
 
 namespace RssToEmail
 {
 	class Program
 	{
+		protected static ILog Log { get; set; }
+
 		static void Main(string[] args)
 		{
-			var urls = ConfigurationManager.AppSettings["urls"].Split(new [] { ';',',' }, StringSplitOptions.RemoveEmptyEntries);
-			var to = new MailAddress(ConfigurationManager.AppSettings["to"]);
-			bool sendAllForNewFeeds;
-			bool.TryParse(ConfigurationManager.AppSettings["SendAllForNewFeeds"] ?? "false", out sendAllForNewFeeds);
-			Console.Write("Starting raven...");
-//			NonAdminHttp.EnsureCanListenToWhenInNonAdminContext(43233);
-			var documentStore = new EmbeddableDocumentStore
-							{
-								ConnectionStringName = "RavenDB",
-//								UseEmbeddedHttpServer = true
-							};
-//			documentStore.Configuration.Port = 43233;
-			documentStore.Initialize();
-			Console.WriteLine("Done");
-			//using (var session = documentStore.OpenSession())
-			//{
-			//    Console.Read();
-			//}
-			using (var session = documentStore.OpenSession())
+			log4net.Config.XmlConfigurator.Configure();
+			Log = LogManager.GetLogger(typeof(Program));
+			try
 			{
-				foreach (var url in urls)
+				var urls = ConfigurationManager.AppSettings["urls"].Split(new [] { ';',',' }, StringSplitOptions.RemoveEmptyEntries);
+				var to = new MailAddress(ConfigurationManager.AppSettings["to"]);
+				bool sendAllForNewFeeds;
+				bool.TryParse(ConfigurationManager.AppSettings["SendAllForNewFeeds"] ?? "false", out sendAllForNewFeeds);
+				Log.Info("Starting raven...");
+	//			NonAdminHttp.EnsureCanListenToWhenInNonAdminContext(43233);
+				var documentStore = new EmbeddableDocumentStore
+								{
+									ConnectionStringName = "RavenDB",
+	//								UseEmbeddedHttpServer = true
+								};
+	//			documentStore.Configuration.Port = 43233;
+				documentStore.Initialize();
+				Log.Info("Raven initialized");
+				//using (var session = documentStore.OpenSession())
+				//{
+				//    Console.Read();
+				//}
+				using (var session = documentStore.OpenSession())
 				{
-					var savedFeed = session.Query<Feed>().SingleOrDefault(x => x.Url == url) ?? 
-						new Feed {
-							Url = url
-						};
-					var isNew = !savedFeed.SentItems.Any();
-					Console.Write("Processing " + url + "...");
-					try
+					var failedSends = 0;
+					foreach (var url in urls)
 					{
-						using (var f = XmlReader.Create(url))
+						var savedFeed = session.Query<Feed>().SingleOrDefault(x => x.Url == url) ?? 
+							new Feed {
+								Url = url
+							};
+						var isNew = !savedFeed.SentItems.Any();
+						Log.Info("Processing " + url + "...");
+						try
 						{
-							var feed = SyndicationFeed.Load(f);
-							var from = new MailAddress(ConfigurationManager.AppSettings["from"], feed.Title.Text);
-
-							bool? supportsContentEncoding = null;
-							foreach (var item in feed.Items.Reverse())
+							var stopwatch = new Stopwatch();
+							stopwatch.Start();
+							using (var f = XmlReader.Create(url))
 							{
-								var linkUri = item.Links.FirstOrDefault();
-								var link = string.Empty;
-								if (linkUri != null)
-									link = linkUri.Uri.ToString().Split('?').First();
+								var feed = SyndicationFeed.Load(f);
+								var from = new MailAddress(ConfigurationManager.AppSettings["from"], feed.Title.Text);
 
-								var id = item.Id;
-								if (item.Id.Contains("?key="))
+								bool? supportsContentEncoding = null;
+								foreach (var item in feed.Items.Reverse())
 								{
-									id = item.Id.Split(new [] { "?key=" }, StringSplitOptions.RemoveEmptyEntries)[1];
-								}
+									var linkUri = item.Links.FirstOrDefault();
+									var link = string.Empty;
+									if (linkUri != null)
+										link = linkUri.Uri.ToString().Split('?').First();
 
-								// Ignore previously processed items
-								if (savedFeed.SentItems.Any(x => 
-										x.Id.Equals(id, StringComparison.OrdinalIgnoreCase) || 
-										x.Id.Equals(item.Id, StringComparison.OrdinalIgnoreCase) || 
-										(!string.IsNullOrEmpty(x.Url) && x.Url == link)))
-									continue;
-
-								// Only send an email if the url is not new or if the user configures that new urls should send all current items
-								if (!isNew  || sendAllForNewFeeds)
-								{
-									try
+									var id = item.Id;
+									if (item.Id.Contains("?key="))
 									{
-										var content = string.Empty;
-										if (item.Summary != null)
-										{
-											content = item.Summary.Text;
-										}
-										else 
-										{
-											var textContent = item.Content as TextSyndicationContent;
-											if (textContent != null)
-												content = textContent.Text;
-										}
+										id = item.Id.Split(new [] { "?key=" }, StringSplitOptions.RemoveEmptyEntries)[1];
+									}
 
+									// Ignore previously processed items
+									if (savedFeed.SentItems.Any(x => 
+											x.Id.Equals(id, StringComparison.OrdinalIgnoreCase) || 
+											x.Id.Equals(item.Id, StringComparison.OrdinalIgnoreCase) || 
+											(!string.IsNullOrEmpty(x.Url) && x.Url == link)))
+										continue;
 
-										if (!supportsContentEncoding.HasValue || supportsContentEncoding.Value)
+									// Only send an email if the url is not new or if the user configures that new urls should send all current items
+									if (!isNew  || sendAllForNewFeeds)
+									{
+										try
 										{
-											if (!supportsContentEncoding.HasValue)
-												supportsContentEncoding = false;
-
-											// If the feed has a <content:encoded> item, use that instead of what comes from <description>
-											foreach (var extension in item.ElementExtensions)
+											var content = string.Empty;
+											if (item.Summary != null)
 											{
-												var element = extension.GetObject<XElement>();
-												if (element.Name.LocalName == "encoded" && element.Name.Namespace.ToString().Contains("content"))
+												content = item.Summary.Text;
+											}
+											else 
+											{
+												var textContent = item.Content as TextSyndicationContent;
+												if (textContent != null)
+													content = textContent.Text;
+											}
+
+
+											if (!supportsContentEncoding.HasValue || supportsContentEncoding.Value)
+											{
+												if (!supportsContentEncoding.HasValue)
+													supportsContentEncoding = false;
+
+												// If the feed has a <content:encoded> item, use that instead of what comes from <description>
+												foreach (var extension in item.ElementExtensions)
 												{
-													content = element.Value;
-													supportsContentEncoding = true;
-													break;
+													var element = extension.GetObject<XElement>();
+													if (element.Name.LocalName == "encoded" && element.Name.Namespace.ToString().Contains("content"))
+													{
+														content = element.Value;
+														supportsContentEncoding = true;
+														break;
+													}
 												}
 											}
+
+											var message = new MailMessage(from, to) {
+												Subject = "[New Post] " + item.Title.Text, 
+												Body = content + string.Format("<p style=\"font-size:12px;line-height:1.4em;margin:10px 0px 10px 0px\">View the original article: <a href=\"{0}\">{0}</a></p>", link), 
+												IsBodyHtml = true
+											};
+
+											var smtp = new SmtpClient();
+											smtp.Send(message);
+											failedSends = 0;
 										}
-
-										var message = new MailMessage(from, to) {
-											Subject = "[New Post] " + item.Title.Text, 
-											Body = content + string.Format("<p style=\"font-size:12px;line-height:1.4em;margin:10px 0px 10px 0px\">View the original article: <a href=\"{0}\">{0}</a></p>", link), 
-											IsBodyHtml = true
-										};
-
-										var smtp = new SmtpClient();
-										smtp.Send(message);
+										catch (Exception ex)
+										{
+											failedSends++;
+											Log.Warn("Problem sending post for " + url, ex);
+											// Ignore this for now... we'll just try again next time the app runs
+											continue;
+										}
 									}
-									catch (Exception ex)
+
+									savedFeed.SentItems.Add(new FeedItem
 									{
-										// Ignore this for now... we'll just try again next time the app runs
-										continue;
-									}
+										Id = id,
+										Url = link
+									});
 								}
-
-								savedFeed.SentItems.Add(new FeedItem
-								{
-									Id = id,
-									Url = link
-								});
 							}
+							session.Store(savedFeed);
+							stopwatch.Stop();
+
+							Log.Debug("Processed " + url + " in " + stopwatch.Elapsed.ToReadableString());
 						}
-						session.Store(savedFeed);
-						Console.WriteLine("Done");
+						catch (Exception ex)
+						{
+							Log.Error(ex);
+						}
 					}
-					catch (Exception ex)
+					session.SaveChanges();
+
+					if (failedSends > 0)
 					{
-						Console.WriteLine("\n" + ex);
+						Log.Error("Error sending emails...");
 					}
 				}
-				session.SaveChanges();
+			}
+			catch (Exception ex)
+			{
+				Log.Fatal(ex);
 			}
 		}
 	}

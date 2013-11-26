@@ -46,6 +46,9 @@
     <Reference Include="ICSharpCode.NRefactory">
       <HintPath>..\packages\RavenDB.Database.1.2.2060-Unstable\lib\net40\ICSharpCode.NRefactory.dll</HintPath>
     </Reference>
+    <Reference Include="log4net">
+      <HintPath>..\packages\log4net.2.0.3\lib\net40-full\log4net.dll</HintPath>
+    </Reference>
     <Reference Include="Lucene.Net">
       <HintPath>..\packages\RavenDB.Database.1.2.2060-Unstable\lib\net40\Lucene.Net.dll</HintPath>
     </Reference>
@@ -92,6 +95,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Extensions\TimeSpanExtensions.cs" />
     <Compile Include="Models\FeedItem.cs" />
     <Compile Include="Models\Feed.cs" />
     <Compile Include="Program.cs" />
