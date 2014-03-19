@@ -92,6 +92,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Extensions\TimeSpanExtensions.cs" />
+    <Compile Include="Formatters\Rss10FeedFormatter.cs" />
     <Compile Include="Models\FeedItem.cs" />
     <Compile Include="Models\Feed.cs" />
     <Compile Include="Program.cs" />

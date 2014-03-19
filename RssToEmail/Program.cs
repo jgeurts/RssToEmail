@@ -10,6 +10,7 @@ using System.Xml.Linq;
 using Raven.Client.Embedded;
 using Raven.Database.Server;
 using RssToEmail.Extensions;
+using RssToEmail.Formatters;
 using RssToEmail.Models;
 using log4net;
 
@@ -60,8 +61,29 @@ namespace RssToEmail
 							stopwatch.Start();
 							using (var f = XmlReader.Create(url))
 							{
-								var feed = SyndicationFeed.Load(f);
-								var from = new MailAddress(ConfigurationManager.AppSettings["from"], feed.Title.Text);
+								SyndicationFeed feed;
+
+								// Try rdf first
+								var rss10FeedParser = new Rss10FeedFormatter();
+								if (rss10FeedParser.CanRead(f))
+								{
+									rss10FeedParser.ReadFrom(f);
+									feed = rss10FeedParser.Feed;
+								}
+								else
+								{
+									feed = SyndicationFeed.Load(f);
+								}
+								var fromTitle = feed.Title.Text;
+								if (string.IsNullOrWhiteSpace(fromTitle))
+								{
+									var author = feed.Authors.FirstOrDefault();
+									if (author != null)
+									{
+										fromTitle = author.Name;
+									}
+								}
+								var from = new MailAddress(ConfigurationManager.AppSettings["from"], fromTitle);
 
 								bool? supportsContentEncoding = null;
 								foreach (var item in feed.Items.Reverse())
@@ -71,16 +93,16 @@ namespace RssToEmail
 									if (linkUri != null)
 										link = linkUri.Uri.ToString().Split('?').First();
 
-									var id = item.Id;
-									if (item.Id.Contains("?key="))
+									var id = item.Id ?? link;
+									if (id.Contains("?key="))
 									{
-										id = item.Id.Split(new [] { "?key=" }, StringSplitOptions.RemoveEmptyEntries)[1];
+										id = id.Split(new [] { "?key=" }, StringSplitOptions.RemoveEmptyEntries)[1];
 									}
 
 									// Ignore previously processed items
 									if (savedFeed.SentItems.Any(x => 
 											x.Id.Equals(id, StringComparison.OrdinalIgnoreCase) || 
-											x.Id.Equals(item.Id, StringComparison.OrdinalIgnoreCase) || 
+											x.Id.Equals(item.Id ?? "ignore in this case", StringComparison.OrdinalIgnoreCase) || 
 											(!string.IsNullOrEmpty(x.Url) && x.Url == link)))
 										continue;
 
@@ -121,7 +143,7 @@ namespace RssToEmail
 											}
 
 											var message = new MailMessage(from, to) {
-												Subject = "[New Post] " + item.Title.Text, 
+												Subject = "[New Post] " + HttpUtility.HtmlDecode(item.Title.Text), 
 												Body = content + string.Format("<p style=\"font-size:12px;line-height:1.4em;margin:10px 0px 10px 0px\">View the original article: <a href=\"{0}\">{0}</a></p>", link), 
 												IsBodyHtml = true
 											};
